@@ -1,0 +1,86 @@
+﻿@page "/counter"
+@page "/whatsapp"
+@rendermode InteractiveWebAssembly
+
+<PageTitle>WhatsApp</PageTitle>
+
+<h1>WhatsApp Page</h1>
+
+<p>Hier kannst du zwei hart codierte Localhost-Aufrufe starten und die Wetterdaten direkt in einer Tabelle anzeigen.</p>
+
+<div class="d-flex gap-2 flex-wrap">
+    <button class="btn btn-success" @onclick="() => LoadWeatherAsync(HttpsUrl)">Elmar HTTPS</button>
+    <button class="btn btn-outline-success" @onclick="() => LoadWeatherAsync(HttpUrl)">Elmar HTTP</button>
+</div>
+
+@if (isLoading)
+{
+    <p class="mt-3"><em>Lade Wetterdaten...</em></p>
+}
+else if (!string.IsNullOrWhiteSpace(errorMessage))
+{
+    <p class="mt-3 text-danger">@errorMessage</p>
+}
+else if (forecasts is not null)
+{
+    <p class="mt-3"><strong>Quelle:</strong> @selectedUrl</p>
+
+    <table class="table mt-3">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Temp. (C)</th>
+                <th>Temp. (F)</th>
+                <th>Summary</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var forecast in forecasts)
+            {
+                <tr>
+                    <td>@forecast.Date.ToShortDateString()</td>
+                    <td>@forecast.TemperatureC</td>
+                    <td>@forecast.TemperatureF</td>
+                    <td>@forecast.Summary</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private const string HttpsUrl = "https://localhost:7266";
+    private const string HttpUrl = "http://localhost:5158";
+
+    private WeatherForecast[]? forecasts;
+    private string? selectedUrl;
+    private string? errorMessage;
+    private bool isLoading;
+
+    private async Task LoadWeatherAsync(string baseUrl)
+    {
+        isLoading = true;
+        errorMessage = null;
+        selectedUrl = baseUrl;
+
+        try
+        {
+            var httpClient = new HttpClient { BaseAddress = new Uri(baseUrl) };
+            forecasts = await httpClient.GetFromJsonAsync<WeatherForecast[]>("/weatherforecast") ?? [];
+        }
+        catch (Exception ex)
+        {
+            forecasts = null;
+            errorMessage = $"Wetterdaten von {baseUrl} konnten nicht geladen werden: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private sealed record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
+    {
+        public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+    }
+}
