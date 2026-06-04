@@ -1,0 +1,132 @@
+@page "/weather"
+@implements IAsyncDisposable
+@using Microsoft.AspNetCore.SignalR.Client
+@inject NavigationManager Navigation
+
+<PageTitle>Weather</PageTitle>
+
+<h1>Weather</h1>
+
+<p>Diese Seite baut die SignalR-Verbindung direkt im Browser zur lokalen API auf.</p>
+
+@if (isConnecting)
+{
+    <p><em>Loading...</em></p>
+}
+else if (!string.IsNullOrWhiteSpace(errorMessage))
+{
+    <p class="text-danger">@errorMessage</p>
+}
+else if (forecasts is null)
+{
+    <p><em>No data received yet.</em></p>
+}
+else
+{
+    <p><strong>Quelle:</strong> @connectedHubUrl</p>
+
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th aria-label="Temperature in Celsius">Temp. (C)</th>
+                <th aria-label="Temperature in Fahrenheit">Temp. (F)</th>
+                <th>Summary</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var forecast in forecasts)
+            {
+                <tr>
+                    <td>@forecast.Date.ToShortDateString()</td>
+                    <td>@forecast.TemperatureC</td>
+                    <td>@forecast.TemperatureF</td>
+                    <td>@forecast.Summary</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private HubConnection? hubConnection;
+    private WeatherForecast[]? forecasts;
+    private string? connectedHubUrl;
+    private string? errorMessage;
+    private bool isConnecting = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ConnectToWeatherHubAsync();
+    }
+
+    private async Task ConnectToWeatherHubAsync()
+    {
+        Exception? lastException = null;
+
+        foreach (var hubUrl in GetHubUrls())
+        {
+            try
+            {
+                hubConnection = new HubConnectionBuilder()
+                    .WithUrl(hubUrl)
+                    .WithAutomaticReconnect()
+                    .Build();
+
+                hubConnection.On<WeatherForecast[]>("ReceiveWeatherForecast", async receivedForecasts =>
+                {
+                    forecasts = receivedForecasts;
+                    errorMessage = null;
+                    await InvokeAsync(StateHasChanged);
+                });
+
+                await hubConnection.StartAsync();
+                connectedHubUrl = hubUrl;
+                await hubConnection.SendAsync("RequestWeatherForecast");
+                return;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+
+                if (hubConnection is not null)
+                {
+                    await hubConnection.DisposeAsync();
+                    hubConnection = null;
+                }
+            }
+            finally
+            {
+                isConnecting = false;
+            }
+        }
+
+        errorMessage = $"Die SignalR-Verbindung vom Browser zur lokalen API konnte nicht aufgebaut werden: {lastException?.Message}";
+    }
+
+    private IEnumerable<string> GetHubUrls()
+    {
+        yield return "https://localhost:7266/weatherhub";
+
+        if (Navigation.Uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "http://localhost:5158/weatherhub";
+        }
+    }
+
+    private sealed class WeatherForecast
+    {
+        public DateOnly Date { get; set; }
+        public int TemperatureC { get; set; }
+        public string? Summary { get; set; }
+        public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+}
