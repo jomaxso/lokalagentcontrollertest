@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
+using System.Runtime.CompilerServices;
+using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -31,9 +33,38 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Public HTTPS pages calling localhost trigger a Private Network Access preflight in the browser.
+// We add this opt-in header after CORS so the Azure-hosted UI can reach the user's local API.
+app.Use(async (context, next) =>
+{
+    var isPrivateNetworkPreflight =
+        HttpMethods.IsOptions(context.Request.Method) &&
+        string.Equals(context.Request.Headers["Access-Control-Request-Private-Network"], "true", StringComparison.OrdinalIgnoreCase);
+
+    context.Response.OnStarting(() =>
+    {
+        if (isPrivateNetworkPreflight && context.Response.Headers.ContainsKey("Access-Control-Allow-Origin"))
+        {
+            context.Response.Headers["Access-Control-Allow-Private-Network"] = "true";
+            context.Response.Headers.Append("Vary", "Access-Control-Request-Private-Network");
+        }
+
+        return Task.CompletedTask;
+    });
+
+    await next();
+});
+
 app.UseCors("WebAppClient");
 
 app.UseHttpsRedirection();
+
+app.MapGet("/version", () =>
+{
+    var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "dev";
+    return TypedResults.Ok(new ApiVersionResponse(version));
+})
+.WithName("GetVersion");
 
 app.MapGet("/weatherforecast", (ILogger<WeatherForecast> logger) =>
 {
@@ -46,9 +77,20 @@ app.MapGet("/weatherforecast", (ILogger<WeatherForecast> logger) =>
 })
 .WithName("GetWeatherForecast");
 
+app.MapGet("/weatherforecast-sse", (ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+{
+    var logger = loggerFactory.CreateLogger("WeatherSse");
+
+    logger.LogInformation("Weather SSE stream connected");
+
+    return TypedResults.ServerSentEvents(WeatherData.StreamForecasts(logger, cancellationToken), eventType: "forecast");
+});
+
 app.MapHub<WeatherHub>("/weatherhub");
 
 app.Run();
+
+record ApiVersionResponse(string Version);
 
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {
@@ -87,5 +129,30 @@ static class WeatherData
                 Summaries[Random.Shared.Next(Summaries.Length)]
             ))
             .ToArray();
+    }
+
+    public static async IAsyncEnumerable<WeatherForecast> StreamForecasts(
+        ILogger logger,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        try
+        {
+
+            foreach (var forecast in CreateForecasts())
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    yield break;
+                }
+
+                yield return forecast;
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+            }
+
+        }
+        finally
+        {
+            logger.LogInformation("Weather SSE stream disconnected");
+        }
     }
 }

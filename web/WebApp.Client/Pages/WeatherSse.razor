@@ -1,0 +1,278 @@
+@page "/weather-sse"
+@rendermode InteractiveWebAssembly
+@implements IAsyncDisposable
+@using System.Text.Json
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+
+<PageTitle>Weather SSE</PageTitle>
+
+<h1>Weather SSE</h1>
+
+<p>Diese Seite liest die Wetterdaten direkt im Browser per Server-Sent Events von der lokalen API.</p>
+
+<div class="d-flex gap-2 flex-wrap">
+    <button class="btn btn-warning" @onclick="() => StartStreamAsync(HttpsStreamUrl)"
+            disabled="@(!httpsAvailable || isConnecting || isCheckingAvailability || !moduleLoaded)">SSE HTTPS</button>
+    <button class="btn btn-outline-warning" @onclick="() => StartStreamAsync(HttpStreamUrl)"
+            disabled="@(!httpAvailable || isConnecting || isCheckingAvailability || !moduleLoaded)">SSE HTTP</button>
+</div>
+
+@if (isCheckingAvailability)
+{
+    <p class="mt-3"><em>Pruefe lokale API-Endpunkte...</em></p>
+}
+else
+{
+    <p class="mt-3 text-muted">HTTPS: @(httpsAvailable ? "verfuegbar" : "nicht erreichbar") | HTTP: @(httpAvailable ?
+                    "verfuegbar" : "nicht erreichbar")</p>
+    }
+
+    @if (isConnecting)
+    {
+        <p><em>Connecting to stream...</em></p>
+    }
+    else if (!string.IsNullOrWhiteSpace(errorMessage))
+    {
+        <p class="text-danger">@errorMessage</p>
+    }
+    else if (forecasts is null)
+    {
+        <p><em>No data received yet.</em></p>
+    }
+    else
+    {
+        <p><strong>Quelle:</strong> @connectedStreamUrl</p>
+        <p><strong>Letztes Update:</strong> @lastUpdated?.ToLocalTime().ToString("T")</p>
+
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th aria-label="Temperature in Celsius">Temp. (C)</th>
+                    <th aria-label="Temperature in Fahrenheit">Temp. (F)</th>
+                    <th>Summary</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var forecast in forecasts)
+                {
+                    <tr>
+                        <td>@forecast.Date.ToShortDateString()</td>
+                        <td>@forecast.TemperatureC</td>
+                        <td>@forecast.TemperatureF</td>
+                        <td>@forecast.Summary</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+@code {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const int ExpectedForecastCount = 5;
+    private const string HttpsApiUrl = "https://localhost:7266";
+    private const string HttpApiUrl = "http://localhost:5158";
+    private const string HttpsStreamUrl = "https://localhost:7266/weatherforecast-sse";
+    private const string HttpStreamUrl = "http://localhost:5158/weatherforecast-sse";
+    private const string VersionPath = "/version";
+
+    private IJSObjectReference? module;
+    private IJSObjectReference? streamHandle;
+    private DotNetObjectReference<WeatherSse>? dotNetReference;
+    private List<WeatherForecast> forecasts = [];
+    private string? connectedStreamUrl;
+    private string? errorMessage;
+    private DateTimeOffset? lastUpdated;
+    private bool isConnecting;
+    private bool isCheckingAvailability = true;
+    private bool streamCompleted;
+    private bool httpsAvailable;
+    private bool httpAvailable;
+    private bool moduleLoaded;
+    private readonly CancellationTokenSource availabilityCancellation = new();
+    private Task? availabilityMonitorTask;
+
+    protected override void OnInitialized()
+    {
+        availabilityMonitorTask = MonitorEndpointAvailabilityAsync(availabilityCancellation.Token);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        module = await JS.InvokeAsync<IJSObjectReference>("import", "./weatherSse.js");
+        dotNetReference = DotNetObjectReference.Create(this);
+        moduleLoaded = true;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task StartStreamAsync(string streamUrl)
+    {
+        if (module is null || dotNetReference is null)
+        {
+            errorMessage = "Das SSE-Modul konnte noch nicht geladen werden.";
+            return;
+        }
+
+        Exception? lastException = null;
+        isConnecting = true;
+        errorMessage = null;
+
+        try
+        {
+            if (streamHandle is not null)
+            {
+                await streamHandle.InvokeVoidAsync("close");
+                await streamHandle.DisposeAsync();
+                streamHandle = null;
+            }
+
+            forecasts.Clear();
+            streamCompleted = false;
+            streamHandle = await module.InvokeAsync<IJSObjectReference>("connectWeatherStream", streamUrl, dotNetReference);
+            connectedStreamUrl = streamUrl;
+            errorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            lastException = ex;
+
+            if (streamHandle is not null)
+            {
+                await streamHandle.DisposeAsync();
+                streamHandle = null;
+            }
+        }
+        finally
+        {
+            isConnecting = false;
+        }
+
+        if (lastException is not null)
+        {
+            errorMessage = $"Die SSE-Verbindung vom Browser zur lokalen API konnte nicht aufgebaut werden: {lastException.Message}";
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task ReceiveForecasts(string json)
+    {
+        var forecast = JsonSerializer.Deserialize<WeatherForecast>(json, JsonOptions);
+
+        if (forecast is not null)
+        {
+            forecasts.Add(forecast);
+
+            if (forecasts.Count >= ExpectedForecastCount && streamHandle is not null)
+            {
+                // The server intentionally sends the finite list once and then the SSE session is done.
+                streamCompleted = true;
+                await streamHandle.InvokeVoidAsync("close");
+            }
+        }
+
+        lastUpdated = DateTimeOffset.UtcNow;
+        errorMessage = null;
+        isConnecting = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public Task HandleStreamOpened()
+    {
+        errorMessage = null;
+        isConnecting = false;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public Task HandleStreamError(string message)
+    {
+        if (streamCompleted)
+        {
+            return Task.CompletedTask;
+        }
+
+        errorMessage = $"SSE-Streamfehler: {message}";
+        isConnecting = false;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task MonitorEndpointAvailabilityAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                httpsAvailable = await IsEndpointAvailableAsync(HttpsApiUrl, cancellationToken);
+                httpAvailable = await IsEndpointAvailableAsync(HttpApiUrl, cancellationToken);
+                isCheckingAvailability = false;
+
+                await InvokeAsync(StateHasChanged);
+
+                if (!await timer.WaitForNextTickAsync(cancellationToken))
+                {
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private static async Task<bool> IsEndpointAvailableAsync(string baseUrl, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var httpClient = new HttpClient { BaseAddress = new Uri(baseUrl) };
+            using var response = await httpClient.GetAsync(VersionPath, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private sealed class WeatherForecast
+    {
+        public DateOnly Date { get; set; }
+        public int TemperatureC { get; set; }
+        public string? Summary { get; set; }
+        public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        availabilityCancellation.Cancel();
+
+        if (availabilityMonitorTask is not null)
+        {
+            await availabilityMonitorTask;
+        }
+
+        if (streamHandle is not null)
+        {
+            await streamHandle.InvokeVoidAsync("close");
+            await streamHandle.DisposeAsync();
+        }
+
+        if (module is not null)
+        {
+            await module.DisposeAsync();
+        }
+
+        dotNetReference?.Dispose();
+        availabilityCancellation.Dispose();
+    }
+}
