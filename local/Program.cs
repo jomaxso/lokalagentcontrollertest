@@ -17,7 +17,7 @@ builder.Services.AddCors(options =>
             (
                 uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
                 uri.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
-                uri.Host.Equals("webapp.bluepond-6445599a.germanywestcentral.azurecontainerapps.io", StringComparison.OrdinalIgnoreCase)
+                uri.Host.Equals("webapp.icysea-083ad266.germanywestcentral.azurecontainerapps.io", StringComparison.OrdinalIgnoreCase)
             ))
             .AllowAnyHeader()
             .AllowAnyMethod()
