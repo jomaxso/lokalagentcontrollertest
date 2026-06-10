@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 
 sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedService, IAsyncDisposable
@@ -144,11 +145,23 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
 
         using var stream = new FileStream(editorFilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
 
+        var editorProcess = Process.Start(new ProcessStartInfo
+        {
+            FileName = "notepad.exe",
+            Arguments = $"\"{editorFilePath}\"",
+            UseShellExecute = true
+        });
+
+        if (editorProcess is null)
+        {
+            throw new InvalidOperationException("Der Windows-Editor konnte nicht gestartet werden.");
+        }
+
         openedEditorFileName = editorFileName;
         openedEditorFilePath = editorFilePath;
 
         logger.LogInformation(
-            "COM/CATIA simulation opened editor file {EditorFilePath} on STA thread {ThreadId}",
+            "COM/CATIA simulation opened editor file {EditorFilePath} in Windows editor on STA thread {ThreadId}",
             editorFilePath,
             staThreadId);
 
@@ -159,7 +172,7 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
             stream.Length,
             openedAtUtc,
             staThreadId,
-            "Die COM/CATIA-Simulation hat die Editor-Datei auf dem STA-Thread geoeffnet.");
+            "Die COM/CATIA-Simulation hat die Editor-Datei auf dem STA-Thread geoeffnet und im Windows-Editor gestartet.");
     }
 
     private CatiaComSaveReceipt ExecuteSaveOpenedEditorInput(string input)
