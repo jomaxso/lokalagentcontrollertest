@@ -1,0 +1,170 @@
+@page "/global-signalr"
+@rendermode InteractiveWebAssembly
+@implements IDisposable
+@inject WebApp.Client.Services.AgentControlHubService AgentHubService
+
+<PageTitle>Global SignalR</PageTitle>
+
+<h1>Global SignalR</h1>
+
+<p>Diese Seite startet eine zweite SignalR-Verbindung zu einem eigenen Hub-Endpunkt der lokalen API und haelt sie fuer die gesamte WASM-Sitzung aktiv. Darueber laeuft jetzt eine COM/CATIA-Simulation auf einem einzelnen STA-Thread. Die Weather-Seite verwendet weiterhin ihre eigene Verbindung zu <code>/weatherhub</code>.</p>
+
+<div class="d-flex gap-2 flex-wrap mb-3">
+    <button class="btn btn-primary" @onclick="AgentHubService.ReconnectAsync" disabled="@AgentHubService.IsConnecting">Neu verbinden</button>
+    <button class="btn btn-outline-secondary" @onclick="AgentHubService.RequestConnectionInfoAsync" disabled="@(!AgentHubService.IsConnected)">Verbindungsinfo abrufen</button>
+</div>
+
+<dl class="row">
+    <dt class="col-sm-3">Status</dt>
+    <dd class="col-sm-9">@AgentHubService.ConnectionStatus</dd>
+
+    <dt class="col-sm-3">Hub-URL</dt>
+    <dd class="col-sm-9">@(AgentHubService.ConnectedHubUrl ?? "-")</dd>
+
+    <dt class="col-sm-3">Connection ID</dt>
+    <dd class="col-sm-9">@(AgentHubService.ConnectionId ?? "-")</dd>
+
+    <dt class="col-sm-3">Protocol</dt>
+    <dd class="col-sm-9">@(AgentHubService.CatiaComStatus?.ProtocolName ?? "-")</dd>
+
+    <dt class="col-sm-3">STA Thread</dt>
+    <dd class="col-sm-9">@(AgentHubService.CatiaComStatus?.StaThreadId?.ToString() ?? "-")</dd>
+
+    <dt class="col-sm-3">Editor Root</dt>
+    <dd class="col-sm-9">@(AgentHubService.CatiaComStatus?.EditorRootPath ?? "-")</dd>
+
+    <dt class="col-sm-3">Geoeffnete Datei</dt>
+    <dd class="col-sm-9">@(AgentHubService.CatiaComStatus?.OpenedEditorFilePath ?? "-")</dd>
+</dl>
+
+@if (!string.IsNullOrWhiteSpace(AgentHubService.ErrorMessage))
+{
+    <p class="text-danger">@AgentHubService.ErrorMessage</p>
+}
+
+<div class="mb-3">
+    <label class="form-label" for="editor-file-name">CATIA-Datei</label>
+    <input id="editor-file-name" class="form-control" @bind="editorFileName" />
+</div>
+
+<button class="btn btn-outline-primary mb-4"
+        @onclick="OpenFileAsync"
+        disabled="@(!AgentHubService.IsConnected || AgentHubService.IsOpeningEditorFile || string.IsNullOrWhiteSpace(editorFileName))">
+    Datei im COM/CATIA-Thread oeffnen
+</button>
+
+<div class="mb-3">
+    <label class="form-label" for="editor-input">Frontend-Input</label>
+    <InputTextArea id="editor-input" class="form-control" @bind-Value="editorInput" />
+</div>
+
+<button class="btn btn-success mb-4"
+        @onclick="SaveAsync"
+        disabled="@(!AgentHubService.IsConnected || AgentHubService.IsSavingEditorInput || string.IsNullOrWhiteSpace(AgentHubService.CatiaComStatus?.OpenedEditorFilePath) || string.IsNullOrWhiteSpace(editorInput))">
+    In geoeffnete Datei speichern
+</button>
+
+@if (AgentHubService.LastOpenedFileResult is not null)
+{
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="h5">Letztes Open</h2>
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Datei</dt>
+                <dd class="col-sm-9">@AgentHubService.LastOpenedFileResult.EditorFileName</dd>
+
+                <dt class="col-sm-3">Pfad</dt>
+                <dd class="col-sm-9">@AgentHubService.LastOpenedFileResult.EditorFilePath</dd>
+
+                <dt class="col-sm-3">Bestehende Bytes</dt>
+                <dd class="col-sm-9">@AgentHubService.LastOpenedFileResult.ExistingLength</dd>
+
+                <dt class="col-sm-3">Geoeffnet</dt>
+                <dd class="col-sm-9">@AgentHubService.LastOpenedFileResult.OpenedAtUtc.ToLocalTime().ToString("G")</dd>
+
+                <dt class="col-sm-3">ACK</dt>
+                <dd class="col-sm-9">@AgentHubService.LastOpenedFileResult.Acknowledgement</dd>
+            </dl>
+        </div>
+    </div>
+}
+
+@if (AgentHubService.LastSaveResult is not null)
+{
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="h5">Letzter Save</h2>
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Datei</dt>
+                <dd class="col-sm-9">@AgentHubService.LastSaveResult.EditorFileName</dd>
+
+                <dt class="col-sm-3">Pfad</dt>
+                <dd class="col-sm-9">@AgentHubService.LastSaveResult.EditorFilePath</dd>
+
+                <dt class="col-sm-3">Zeichen</dt>
+                <dd class="col-sm-9">@AgentHubService.LastSaveResult.CharacterCount</dd>
+
+                <dt class="col-sm-3">Gespeichert</dt>
+                <dd class="col-sm-9">@AgentHubService.LastSaveResult.SavedAtUtc.ToLocalTime().ToString("G")</dd>
+
+                <dt class="col-sm-3">ACK</dt>
+                <dd class="col-sm-9">@AgentHubService.LastSaveResult.Acknowledgement</dd>
+            </dl>
+        </div>
+    </div>
+}
+
+@if (AgentHubService.Messages.Count == 0)
+{
+    <p><em>Noch keine Hub-Nachrichten empfangen.</em></p>
+}
+else
+{
+    <ul class="list-group">
+        @foreach (var entry in AgentHubService.Messages.OrderByDescending(message => message.Timestamp))
+        {
+            <li class="list-group-item">
+                <div class="fw-semibold">@entry.Source</div>
+                <div>@entry.Message</div>
+                <small class="text-muted">@entry.Timestamp.ToLocalTime().ToString("T")</small>
+            </li>
+        }
+    </ul>
+}
+
+@code {
+    private string editorFileName = "demo-part.CATPart";
+    private string editorInput = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        AgentHubService.Changed += HandleServiceChanged;
+    }
+
+    protected override Task OnInitializedAsync()
+    {
+        return AgentHubService.EnsureStartedAsync();
+    }
+
+    private async Task OpenFileAsync()
+    {
+        var fileName = editorFileName.Trim();
+        await AgentHubService.OpenEditorFileAsync(fileName);
+    }
+
+    private async Task SaveAsync()
+    {
+        var input = editorInput.Trim();
+        await AgentHubService.SaveEditorInputAsync(input);
+    }
+
+    private void HandleServiceChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        AgentHubService.Changed -= HandleServiceChanged;
+    }
+}

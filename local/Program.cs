@@ -8,6 +8,8 @@ var builder = WebApplication.CreateBuilder(args);
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
+builder.Services.AddSingleton<CatiaComStaService>();
+builder.Services.AddHostedService(static serviceProvider => serviceProvider.GetRequiredService<CatiaComStaService>());
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("WebAppClient", policy =>
@@ -87,6 +89,7 @@ app.MapGet("/weatherforecast-sse", (ILoggerFactory loggerFactory, CancellationTo
 });
 
 app.MapHub<WeatherHub>("/weatherhub");
+app.MapHub<AgentControlHub>("/agentcontrolhub");
 
 app.Run();
 
