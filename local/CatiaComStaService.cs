@@ -1,80 +1,20 @@
-using System.Threading.Channels;
+using System.Collections.Concurrent;
+using System.Runtime.Versioning;
 
 sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedService, IAsyncDisposable
 {
     private const string ProtocolName = "COM (CATIA Simulation)";
 
-    private readonly Channel<IStaCommand> commandChannel = Channel.CreateBounded<IStaCommand>(
-        new BoundedChannelOptions(32)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait
-        });
-
-    private readonly CancellationTokenSource shutdownSource = new();
-    private readonly TaskCompletionSource startupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly BlockingCollection<IStaCommand> commandQueue = new(new ConcurrentQueue<IStaCommand>(), 32);
+    private readonly TaskCompletionSource staThreadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource staThreadStop = new();
+    private readonly Lock staThreadGate = new();
     private Thread? staThread;
     private int staThreadId;
     private string? editorRootPath;
     private string? openedEditorFileName;
     private string? openedEditorFilePath;
     private bool isRunning;
-
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("Der COM/CATIA-STA-Dienst ist nur unter Windows verfuegbar.");
-        }
-
-        if (staThread is not null)
-        {
-            return Task.CompletedTask;
-        }
-
-        editorRootPath = ResolveEditorRootPath();
-        staThread = new Thread(RunStaLoop)
-        {
-            IsBackground = true,
-            Name = "CatiaComStaThread"
-        };
-        staThread.SetApartmentState(ApartmentState.STA);
-        staThread.Start();
-
-        return startupCompletion.Task.WaitAsync(cancellationToken);
-    }
-
-    public async Task StopAsync(CancellationToken cancellationToken)
-    {
-        commandChannel.Writer.TryComplete();
-        shutdownSource.Cancel();
-
-        if (staThread is null)
-        {
-            return;
-        }
-
-        var joined = await Task.Run(() => staThread.Join(TimeSpan.FromSeconds(5)), cancellationToken);
-
-        if (!joined)
-        {
-            logger.LogWarning("Der COM/CATIA-STA-Thread wurde nicht innerhalb des Shutdown-Timeouts beendet.");
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        commandChannel.Writer.TryComplete();
-        shutdownSource.Cancel();
-
-        if (staThread is not null && staThread.IsAlive)
-        {
-            await Task.Run(() => staThread.Join(TimeSpan.FromSeconds(5)));
-        }
-
-        shutdownSource.Dispose();
-    }
 
     public CatiaComServiceStatus GetStatus()
     {
@@ -98,7 +38,7 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
             SanitizeEditorFileName(editorFileName),
             new TaskCompletionSource<CatiaComOpenReceipt>(TaskCreationOptions.RunContinuationsAsynchronously));
 
-        await commandChannel.Writer.WriteAsync(command, cancellationToken);
+        commandQueue.Add(command, cancellationToken);
         return await command.Completion.Task.WaitAsync(cancellationToken);
     }
 
@@ -113,10 +53,60 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
             input,
             new TaskCompletionSource<CatiaComSaveReceipt>(TaskCreationOptions.RunContinuationsAsynchronously));
 
-        await commandChannel.Writer.WriteAsync(command, cancellationToken);
+        commandQueue.Add(command, cancellationToken);
         return await command.Completion.Task.WaitAsync(cancellationToken);
     }
 
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Der COM/CATIA-STA-Dienst ist nur unter Windows verfuegbar.");
+        }
+
+        editorRootPath = ResolveEditorRootPath();
+        EnsureStaThreadStarted();
+        return staThreadStarted.Task.WaitAsync(cancellationToken);
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        commandQueue.CompleteAdding();
+        staThreadStop.Cancel();
+
+        await JoinStaThreadAsync(cancellationToken);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        commandQueue.CompleteAdding();
+        staThreadStop.Cancel();
+        await JoinStaThreadAsync(CancellationToken.None);
+        staThreadStop.Dispose();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private void EnsureStaThreadStarted()
+    {
+        lock (staThreadGate)
+        {
+            if (staThread is not null)
+            {
+                return;
+            }
+
+            staThread = new Thread(RunStaLoop)
+            {
+                IsBackground = true,
+                Name = "CatiaComStaThread"
+            };
+
+            staThread.SetApartmentState(ApartmentState.STA);
+            staThread.Start();
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
     private void RunStaLoop()
     {
         try
@@ -124,25 +114,22 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
             isRunning = true;
             staThreadId = Environment.CurrentManagedThreadId;
             Directory.CreateDirectory(GetEditorRootPath());
-            startupCompletion.TrySetResult();
+            staThreadStarted.TrySetResult();
 
-            while (commandChannel.Reader.WaitToReadAsync(shutdownSource.Token).AsTask().GetAwaiter().GetResult())
+            foreach (var command in commandQueue.GetConsumingEnumerable(staThreadStop.Token))
             {
-                while (commandChannel.Reader.TryRead(out var command))
-                {
-                    command.Execute(this);
-                }
+                ExecuteStaCommand(command);
             }
         }
         catch (OperationCanceledException)
         {
-            startupCompletion.TrySetResult();
+            staThreadStarted.TrySetResult();
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            startupCompletion.TrySetException(ex);
-            FailPendingCommands(ex);
-            logger.LogError(ex, "Der COM/CATIA-STA-Thread ist unerwartet beendet worden.");
+            staThreadStarted.TrySetException(exception);
+            FailPendingCommands(exception);
+            logger.LogError(exception, "Der COM/CATIA-STA-Thread ist unerwartet beendet worden.");
         }
         finally
         {
@@ -212,11 +199,38 @@ sealed class CatiaComStaService(ILogger<CatiaComStaService> logger) : IHostedSer
             "Die COM/CATIA-Simulation hat den Frontend-Input in die geoeffnete Editor-Datei geschrieben.");
     }
 
-    private void FailPendingCommands(Exception exception)
+    private void ExecuteStaCommand(IStaCommand command)
     {
-        while (commandChannel.Reader.TryRead(out var command))
+        try
+        {
+            command.Execute(this);
+        }
+        catch (Exception exception)
         {
             command.Fail(exception);
+        }
+    }
+
+    private void FailPendingCommands(Exception exception)
+    {
+        while (commandQueue.TryTake(out var pendingCommand))
+        {
+            pendingCommand.Fail(exception);
+        }
+    }
+
+    private async Task JoinStaThreadAsync(CancellationToken cancellationToken)
+    {
+        if (staThread is null)
+        {
+            return;
+        }
+
+        var joined = await Task.Run(() => staThread.Join(TimeSpan.FromSeconds(5)), cancellationToken);
+
+        if (!joined)
+        {
+            logger.LogWarning("Der COM/CATIA-STA-Thread wurde nicht innerhalb des Shutdown-Timeouts beendet.");
         }
     }
 
