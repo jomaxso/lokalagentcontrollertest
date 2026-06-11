@@ -1,27 +1,31 @@
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Threading.Channels;
-using Local.Lib;
 using Local.Services;
+using Local.Lib;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// CORS freischalten für die lokale Web-App (z.B. Port 3000)
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("LocalWebAccess", policy =>
+    options.AddPolicy("WebAppClient", policy =>
     {
-        policy.SetIsOriginAllowed(origin => Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
-                uri.Host.Equals("webapp.icysea-083ad266.germanywestcentral.azurecontainerapps.io", StringComparison.OrdinalIgnoreCase))
+        policy.SetIsOriginAllowed(origin =>
+            Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+            (
+                uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.Equals("webapp.icysea-083ad266.germanywestcentral.azurecontainerapps.io", StringComparison.OrdinalIgnoreCase)
+            ))
             .AllowAnyHeader()
             .AllowAnyMethod()
-            .AllowCredentials(); // Lebenswichtig für WebSockets / SignalR
+            .AllowCredentials();
     });
 });
 
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
 
-// 1. Thread-sicheren Datchannel (MTA-Welt) registrieren
 builder.Services.AddSingleton(_ =>
     Channel.CreateBounded<CatiaCommand>(new BoundedChannelOptions(100)
     {
@@ -30,13 +34,7 @@ builder.Services.AddSingleton(_ =>
         SingleWriter = false
     }));
 
-// 2. Progress-Infrastruktur mitsamt Hub-Zugriff hinterlegen
-builder.Services.AddSingleton<ICatiaProgressReporter, SignalRProgressReporter>();
-
-// 3. STA-Engine-Thread bereitstellen
 builder.Services.AddSingleton<CatiaScheduler>();
-
-// 4. Den permanenten Channel-Consumer-Dienst (HostedService) aktivieren
 builder.Services.AddHostedService<CatiaChannelWorker>();
 
 var app = builder.Build();
@@ -46,12 +44,42 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+app.Use(async (context, next) =>
+{
+    var isPrivateNetworkPreflight =
+        HttpMethods.IsOptions(context.Request.Method) &&
+        string.Equals(context.Request.Headers["Access-Control-Request-Private-Network"], "true", StringComparison.OrdinalIgnoreCase);
+
+    context.Response.OnStarting(() =>
+    {
+        if (isPrivateNetworkPreflight && context.Response.Headers.ContainsKey("Access-Control-Allow-Origin"))
+        {
+            context.Response.Headers["Access-Control-Allow-Private-Network"] = "true";
+            context.Response.Headers.Append("Vary", "Access-Control-Request-Private-Network");
+        }
+
+        return Task.CompletedTask;
+    });
+
+    await next();
+});
+
+app.UseCors("WebAppClient");
+
 app.UseHttpsRedirection();
 
-app.UseCors("LocalWebAccess");
-app.MapHub<CatiaHub>("/catiaHub");
+app.MapGet("/version", () =>
+{
+    var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "dev";
+    return TypedResults.Ok(new ApiVersionResponse(version));
+})
+.WithName("GetVersion");
+
+app.MapHub<AgentControlHub>("/agentcontrolhub");
 
 app.Run();
+
+record ApiVersionResponse(string Version);
 
 [SupportedOSPlatform("windows")]
 partial class Program;

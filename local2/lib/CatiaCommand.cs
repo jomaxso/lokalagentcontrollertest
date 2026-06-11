@@ -2,29 +2,52 @@ namespace Local.Lib;
 
 public abstract class CatiaCommand
 {
-    private readonly TaskCompletionSource<string> _tcs = new();
-    public Task<string> Task => _tcs.Task;
+    public virtual bool RequiresCatiaConnection => false;
 
-    // Wird vom Scheduler auf dem STA-Thread aufgerufen
-    public void Run(INFITF.Application catia)
+    internal abstract void Run(ICatiaCommandContext context);
+
+    internal abstract void Fail(Exception exception);
+}
+
+public abstract class CatiaCommand<TResult> : CatiaCommand
+{
+    private readonly TaskCompletionSource<TResult> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<TResult> Completion => _completion.Task;
+
+    internal override void Run(ICatiaCommandContext context)
     {
         try
         {
-            string result = ExecuteInternal(catia);
-            _tcs.TrySetResult(result);
+            _completion.TrySetResult(Execute(context));
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _tcs.TrySetException(ex);
+            _completion.TrySetException(exception);
         }
     }
 
-    public string ExecuteInternal(INFITF.Application catia)
+    internal override void Fail(Exception exception)
     {
-        return Execute(catia);
+        _completion.TrySetException(exception);
     }
 
-    protected abstract string Execute(INFITF.Application catia);
+    protected abstract TResult Execute(ICatiaCommandContext context);
+}
+
+public interface ICatiaCommandContext
+{
+    string ProtocolName { get; }
+
+    string EditorRootPath { get; }
+
+    int StaThreadId { get; }
+
+    INFITF.Application? Catia { get; }
+
+    (string? EditorFileName, string? EditorFilePath) GetOpenedEditorFile();
+
+    void SetOpenedEditorFile(string editorFileName, string editorFilePath);
 }
 
 public class CatiaException : Exception
