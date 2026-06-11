@@ -9,6 +9,7 @@ builder.AddProject("webapp", "web/WebApp/WebApp.csproj")
 if (builder.ExecutionContext.IsRunMode)
 {
     builder.AddProject("local", "local/local.csproj");
+    builder.AddProject("local2", "local2/local2.csproj");
 }
 
 builder.AddAzureContainerAppEnvironment("aca-env");
