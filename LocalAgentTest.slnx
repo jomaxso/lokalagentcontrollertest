@@ -1,0 +1,6 @@
+﻿<Solution>
+  <Project Path="local/local.csproj" />
+  <Project Path="local2/local2.csproj" />
+  <Project Path="web/WebApp/WebApp.csproj" />
+  <Project Path="web/WebApp.Client/WebApp.Client.csproj" />
+</Solution>
